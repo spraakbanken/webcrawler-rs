@@ -1,84 +1,157 @@
-use crate::Spider;
-use chrono::{DateTime, Utc};
-use futures::stream::StreamExt;
-use serde::de::Deserialize;
 use std::error::Error as StdError;
-use std::{
-    collections::HashMap,
-    fs,
-    io::{self, Write},
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
+use std::future::Future;
+use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
-use tokio::signal;
+use std::time::Duration;
+
+use futures::stream::StreamExt;
 use tokio::{
-    sync::{mpsc, RwLock},
+    sync::{broadcast, mpsc},
     time::{sleep, Instant},
 };
-use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-type ProcessingState = HashMap<String, CrawledState>;
-type SharedProcessingState = Arc<RwLock<ProcessingState>>;
+use self::state::SharedProcessingState;
+use self::statistics::Statistics;
+use crate::shutdown::Shutdown;
+use crate::Spider;
+
+mod state;
+mod statistics;
 
 pub struct Crawler {
     delay: Duration,
     crawling_concurrency: usize,
     processing_concurrency: usize,
-    saved_state_path: Option<PathBuf>,
+    notify_shutdown: broadcast::Sender<()>,
+    shutdown_complete_tx: mpsc::Sender<()>,
+    visited_urls: SharedProcessingState,
+    statistics: Statistics,
 }
 
 #[derive(Debug, Clone)]
 pub struct CrawlerOptions {
+    /// Optional path to read and save state to.
+    pub saved_state_path: Option<PathBuf>,
+    /// The delay to use between scrapings.
     pub delay: Duration,
+    /// The number of concurrent scrapers.
     pub crawling_concurrency: usize,
+    /// The number of concurrent processors.
     pub processing_concurrency: usize,
 }
 
-impl Crawler {
-    pub fn new(
-        saved_state_path: Option<PathBuf>,
-        CrawlerOptions {
-            delay,
-            crawling_concurrency,
-            processing_concurrency,
-        }: CrawlerOptions,
-    ) -> Self {
+#[derive(Debug, Clone)]
+struct Handler {
+    shutdown: Shutdown,
+    _shutdown_complete: mpsc::Sender<()>,
+}
+
+impl Default for CrawlerOptions {
+    fn default() -> Self {
         Self {
-            delay,
-            crawling_concurrency,
-            processing_concurrency,
-            saved_state_path,
+            saved_state_path: None,
+            delay: Duration::from_millis(500),
+            crawling_concurrency: 1,
+            processing_concurrency: 20,
+        }
+    }
+}
+
+/// Run the crawler with default options.
+///
+/// Using the provided spider to scrape and process.
+///
+/// `tokio::signal::ctrl_c()` can be used as the `shutdown` argument. This will
+/// listen for a SIGINT signal.
+pub async fn run<T: Send + 'static, E: StdError + Send + 'static>(
+    spider: Arc<dyn Spider<Item = T, Error = E>>,
+    shutdown: impl Future,
+) {
+    run_with_options(spider, shutdown, CrawlerOptions::default()).await
+}
+
+/// Run the crawler with given options.
+///
+/// Using the provided spider to scrape and process.
+///
+/// `tokio::signal::ctrl_c()` can be used as the `shutdown` argument. This will
+/// listen for a SIGINT signal.
+pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static>(
+    spider: Arc<dyn Spider<Item = T, Error = E>>,
+    shutdown: impl Future,
+    CrawlerOptions {
+        saved_state_path,
+        delay,
+        crawling_concurrency,
+        processing_concurrency,
+    }: CrawlerOptions,
+) {
+    let starting_time = Instant::now();
+    let (notify_shutdown, _) = broadcast::channel(1);
+    let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
+    let visited_urls = state::read_state(saved_state_path.as_deref());
+
+    let crawler = Crawler {
+        delay,
+        crawling_concurrency,
+        processing_concurrency,
+        notify_shutdown,
+        shutdown_complete_tx,
+        visited_urls,
+        statistics: Statistics::default(),
+    };
+
+    tokio::select! {
+        res = crawler.run(spider) => {
+            if let Err(err) = res {
+                tracing::error!(cause = %err, "crawling failed");
+            }
+        }
+        _ = shutdown => {
+            tracing::info!("shutting down");
+            println!("shutting down");
         }
     }
 
+    let Crawler {
+        notify_shutdown,
+        shutdown_complete_tx,
+        visited_urls,
+        statistics,
+        ..
+    } = crawler;
+
+    drop(notify_shutdown);
+    drop(shutdown_complete_tx);
+
+    let _ = shutdown_complete_rx.recv().await;
+
+    tracing::info!("crawler: writing state");
+
+    statistics.write_to_log(starting_time.elapsed());
+
+    state::write_state(saved_state_path.as_deref(), visited_urls).await;
+}
+impl Crawler {
     pub async fn run<T: Send + 'static, E: StdError + Send + 'static>(
         &self,
         spider: Arc<dyn Spider<Item = T, Error = E>>,
-    ) {
+    ) -> Result<(), Box<dyn StdError>> {
         tracing::info!("running spider '{}'", spider.name());
-        let starting_time = Instant::now();
-        let visited_urls = self.read_state();
+        let visited_urls = self.visited_urls.clone();
         let crawling_concurrency = self.crawling_concurrency;
         let crawling_queue_capacity = crawling_concurrency * 400;
         let processing_concurrency = self.processing_concurrency;
         let processing_queue_capacity = processing_concurrency * 10;
         let active_spiders = Arc::new(AtomicUsize::new(0));
 
-        // Statistics
-        let num_scrapings = Arc::new(AtomicUsize::new(0));
-        let num_scrape_errors = Arc::new(AtomicUsize::new(0));
-        let num_processings = Arc::new(AtomicUsize::new(0));
-        let num_process_errors = Arc::new(AtomicUsize::new(0));
-
         let (urls_to_visit_tx, urls_to_visit_rx) = mpsc::channel(crawling_queue_capacity);
         let (items_tx, items_rx) = mpsc::channel(processing_queue_capacity);
-        let (new_urls_tx, mut new_urls_rx) = mpsc::channel(crawling_queue_capacity);
-        let token = CancellationToken::new();
+        let (new_urls_tx, new_urls_rx) = mpsc::channel(crawling_queue_capacity);
         let tracker = TaskTracker::new();
 
         for url in spider.start_urls() {
@@ -86,26 +159,30 @@ impl Crawler {
             visited_urls
                 .write()
                 .await
-                .insert(url.clone(), CrawledState::queued());
+                .insert(url.clone(), state::CrawledState::queued());
             let _ = urls_to_visit_tx.send(url).await;
         }
+
+        let handler = Handler {
+            shutdown: Shutdown::new(self.notify_shutdown.subscribe()),
+            _shutdown_complete: self.shutdown_complete_tx.clone(),
+        };
 
         self.launch_processors(
             &tracker,
             processing_concurrency,
-            num_processings.clone(),
-            num_process_errors.clone(),
+            self.statistics.num_processings.clone(),
+            self.statistics.num_process_errors.clone(),
             visited_urls.clone(),
             spider.clone(),
             items_rx,
-            token.clone(),
         );
 
         self.launch_scrapers(
             &tracker,
             crawling_concurrency,
-            num_scrapings.clone(),
-            num_scrape_errors.clone(),
+            self.statistics.num_scrapings.clone(),
+            self.statistics.num_scrape_errors.clone(),
             visited_urls.clone(),
             spider.clone(),
             urls_to_visit_rx,
@@ -113,53 +190,20 @@ impl Crawler {
             items_tx,
             active_spiders.clone(),
             self.delay,
-            token.clone(),
+            handler.clone(),
         );
 
-        tracker.spawn(async move {
-            let token = token.clone();
-            if let Err(error) = signal::ctrl_c().await {
-                tracing::error!("Failed to listen for event: {:?}", error);
-            }
-            token.cancel();
-        });
+        listen_for_new_urls(
+            new_urls_tx.clone(),
+            new_urls_rx,
+            visited_urls.clone(),
+            urls_to_visit_tx.clone(),
+            handler.clone(),
+            crawling_queue_capacity,
+            active_spiders.clone(),
+        )
+        .await;
         tracker.close();
-
-        loop {
-            if let Ok((visited_url, new_urls)) = new_urls_rx.try_recv() {
-                visited_urls
-                    .write()
-                    .await
-                    .entry(visited_url)
-                    .and_modify(|state| state.scraped_ok())
-                    .or_insert_with(|| {
-                        let mut state = CrawledState::default();
-                        state.scraped_ok();
-                        state
-                    });
-
-                for url in new_urls {
-                    if !visited_urls.read().await.contains_key(&url) {
-                        visited_urls
-                            .write()
-                            .await
-                            .insert(url.clone(), CrawledState::queued());
-                        tracing::debug!("queueing: {}", url);
-                        let _ = urls_to_visit_tx.send(url).await;
-                    }
-                }
-            }
-
-            if new_urls_tx.capacity() == crawling_queue_capacity // new_urls channel is empty
-            && urls_to_visit_tx.capacity() == crawling_queue_capacity // urls_to_visit channel is empty
-            && active_spiders.load(Ordering::SeqCst) == 0
-            {
-                // no more work, we leave
-                break;
-            }
-
-            sleep(Duration::from_millis(5)).await;
-        }
 
         tracing::info!("crawler: control loop exited");
 
@@ -169,115 +213,7 @@ impl Crawler {
         // and then we wait for the streams to complete
         tracker.wait().await;
 
-        self.write_state(visited_urls).await;
-
-        let num_procs = num_processings.load(Ordering::Relaxed);
-        let num_proc_errors = num_process_errors.load(Ordering::Relaxed);
-        let num_scrapes = num_scrapings.load(Ordering::Relaxed);
-        let num_scrap_errors = num_scrape_errors.load(Ordering::Relaxed);
-        let total_running_time = format!("{:?}", starting_time.elapsed());
-        tracing::info!(
-            num_processings = num_procs,
-            num_process_errors = num_proc_errors,
-            num_scrapings = num_scrapes,
-            num_scrape_errors = num_scrap_errors,
-            running_time = total_running_time,
-            "statistics"
-        );
-    }
-
-    async fn write_state(&self, visited_urls: SharedProcessingState) {
-        let json = serde_json::json!({ "visited_urls": &*visited_urls.read().await });
-        match serde_json::to_string(&json) {
-            Ok(json_string) => {
-                if let Some(state_path) = &self.saved_state_path {
-                    tracing::info!("crawler: writing state to '{}'", state_path.display());
-
-                    match fs::File::create(state_path) {
-                        Ok(mut file) => match file.write_all(json_string.as_bytes()) {
-                            Ok(_) => {
-                                tracing::info!("crawler: wrote state to '{}'", state_path.display())
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    "failed write to '{}', error '{:?}'",
-                                    state_path.display(),
-                                    err
-                                );
-                                tracing::error!("visited_urls={:?}", json_string);
-                            }
-                        },
-                        Err(err) => {
-                            tracing::error!(
-                                "failed to create '{}', error '{:?}'",
-                                state_path.display(),
-                                err
-                            );
-                            tracing::error!("visited_urls={:?}", json_string);
-                        }
-                    }
-                } else {
-                    tracing::info!("crawler: writing state to 'stdout'");
-                    let _ = io::stdout().lock().write_all(json_string.as_bytes());
-                }
-            }
-            Err(err) => {
-                tracing::error!("failed to serialize state, error '{:?}'", err);
-                tracing::error!("visited_urls={:?}", json);
-            }
-        }
-    }
-
-    fn read_state(&self) -> SharedProcessingState {
-        let processing_state = if let Some(saved_state_path) = &self.saved_state_path {
-            match fs::File::open(saved_state_path) {
-                Ok(file) => {
-                    let reader = io::BufReader::new(file);
-                    match serde_json::from_reader::<io::BufReader<fs::File>, serde_json::Value>(
-                        reader,
-                    ) {
-                        Ok(mut json) => {
-                            match ProcessingState::deserialize(json["visited_urls"].take()) {
-                                Ok(visited_urls) => {
-                                    tracing::info!(
-                                        "read saved state from '{}'",
-                                        saved_state_path.display()
-                                    );
-                                    visited_urls
-                                }
-                                Err(err) => {
-                                    tracing::error!(
-                                        "Failed to read saved state from '{}' Error: '{:?}'. Ignoring",
-                                        saved_state_path.display(),
-                                        err
-                                    );
-                                    ProcessingState::new()
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                "Failed to read file '{}' Error: '{:?}'. Ignoring",
-                                saved_state_path.display(),
-                                err
-                            );
-                            ProcessingState::new()
-                        }
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "Failed to open file from '{}' Error: '{:?}'. Ignoring",
-                        saved_state_path.display(),
-                        err
-                    );
-                    ProcessingState::new()
-                }
-            }
-        } else {
-            ProcessingState::new()
-        };
-        Arc::new(RwLock::new(processing_state))
+        Ok(())
     }
 
     fn launch_processors<T: Send + 'static, E: StdError + Send + 'static>(
@@ -289,14 +225,12 @@ impl Crawler {
         visited_urls: SharedProcessingState,
         spider: Arc<dyn Spider<Item = T, Error = E>>,
         items: mpsc::Receiver<(String, T)>,
-        token: CancellationToken,
     ) {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(items)
                 .for_each_concurrent(concurrency, |(url, item)| async {
-                    let token = token.clone();
-                    num_processings.fetch_add(1, Ordering::SeqCst);
-                    match spider.process(url.clone(), item, token).await {
+                    tracing::debug!(url, "processing item from url");
+                    match spider.process(url.clone(), item).await {
                         Err(err) => {
                             num_process_errors.fetch_add(1, Ordering::SeqCst);
                             tracing::error!(url = url, "Processing error: {:?}", err);
@@ -306,9 +240,7 @@ impl Crawler {
                                 .entry(url)
                                 .and_modify(|state| state.process_error(err.to_string()))
                                 .or_insert_with(|| {
-                                    let mut state = CrawledState::default();
-                                    state.process_error(err.to_string());
-                                    state
+                                    state::CrawledState::queued_and_process_error(err.to_string())
                                 });
                         }
                         Ok(output) => {
@@ -318,12 +250,11 @@ impl Crawler {
                                 .entry(url)
                                 .and_modify(|state| state.processed_ok(&output))
                                 .or_insert_with(|| {
-                                    let mut state = CrawledState::default();
-                                    state.processed_ok(&output);
-                                    state
+                                    state::CrawledState::queued_and_processed_ok(&output)
                                 });
                         }
                     }
+                    num_processings.fetch_add(1, Ordering::SeqCst);
                 })
                 .await;
         });
@@ -343,45 +274,49 @@ impl Crawler {
         items_tx: mpsc::Sender<(String, T)>,
         active_spiders: Arc<AtomicUsize>,
         delay: Duration,
-        token: CancellationToken,
+        handler: Handler,
     ) {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(urls_to_visit)
                 .for_each_concurrent(concurrency, |queued_url| async {
-                    let token = token.clone();
+                    tracing::info!(url = queued_url, "scraping");
+                    let mut handler = handler.clone();
                     active_spiders.fetch_add(1, Ordering::SeqCst);
                     let mut urls = Vec::new();
-                    num_scrapings.fetch_add(1, Ordering::SeqCst);
-                    let res = match spider.scrape(queued_url.clone(), token).await {
-                        Err(err) => {
-                            num_scrape_errors.fetch_add(1, Ordering::SeqCst);
-                            tracing::error!(url = queued_url, "Scraping error: {:?}", err);
-                            visited_urls
-                                .write()
-                                .await
-                                .entry(queued_url.clone())
-                                .and_modify(|state| state.scrape_error(err.to_string()))
-                                .or_insert_with(|| {
-                                    let mut state = CrawledState::default();
-                                    state.scrape_error(err.to_string());
-                                    state
-                                });
-                            None
+                    let res = tokio::select! {
+                        res = spider.scrape(queued_url.clone()) => {
+                            match res {
+                                Err(err) => {
+                                    num_scrapings.fetch_add(1, Ordering::SeqCst);
+                                    num_scrape_errors.fetch_add(1, Ordering::SeqCst);
+                                    tracing::error!(url = queued_url, "Scraping error: {:?}", err);
+                                    visited_urls
+                                        .write()
+                                        .await
+                                        .entry(queued_url.clone())
+                                        .and_modify(|state| state.scrape_error(err.to_string()))
+                                        .or_insert_with(|| state::CrawledState::queued_and_scrape_error(err.to_string()));
+                                    None
+                                }
+                                Ok((items, new_urls)) => {
+                                    num_scrapings.fetch_add(1, Ordering::SeqCst);
+                                    visited_urls
+                                        .write()
+                                        .await
+                                        .entry(queued_url.clone())
+                                        .and_modify(|state| state.scraped_ok())
+                                        .or_insert_with(state::CrawledState::queued_and_scraped_ok);
+                                    Some((items, new_urls))
+                                }
+                            }
                         }
-                        Ok((items, new_urls)) => {
-                            visited_urls
-                                .write()
-                                .await
-                                .entry(queued_url.clone())
-                                .and_modify(|state| state.scraped_ok())
-                                .or_insert_with(|| {
-                                    let mut state = CrawledState::default();
-                                    state.scraped_ok();
-                                    state
-                                });
-                            Some((items, new_urls))
-                        }
+                            _ = handler.shutdown.recv() => {
+                                // If a shutdown signal is received, return
+                                tracing::info!(url = queued_url, "scraper: shutdown signal received, shutting down");
+                                None
+                            }
                     };
+
 
                     if let Some((items, new_urls)) = res {
                         for item in items {
@@ -401,52 +336,53 @@ impl Crawler {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct CrawledState {
-    queued: DateTime<Utc>,
-    scraped_at: Option<DateTime<Utc>>,
-    scrape_result: Option<StateOutcome>,
-    processed_at: Option<DateTime<Utc>>,
-    process_result: Option<StateOutcome>,
-}
+async fn listen_for_new_urls(
+    // &self,
+    new_urls_tx: mpsc::Sender<(String, Vec<String>)>,
+    mut new_urls_rx: mpsc::Receiver<(String, Vec<String>)>,
+    visited_urls: SharedProcessingState,
+    urls_to_visit_tx: mpsc::Sender<String>,
+    mut handler: Handler,
+    crawling_queue_capacity: usize,
+    active_spiders: Arc<AtomicUsize>,
+) {
+    while !handler.shutdown.is_shutdown() {
+        if let Ok((visited_url, new_urls)) = new_urls_rx.try_recv() {
+            visited_urls
+                .write()
+                .await
+                .entry(visited_url)
+                .and_modify(|state| state.scraped_ok())
+                .or_insert_with(state::CrawledState::queued_and_scraped_ok);
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "status", content = "outcome")]
-pub enum StateOutcome {
-    Ok(String),
-    Error(String),
-}
+            for url in new_urls {
+                if !visited_urls.read().await.contains_key(&url) {
+                    tracing::debug!("queueing: {}", url);
 
-impl Default for CrawledState {
-    fn default() -> Self {
-        Self {
-            queued: Utc::now(),
-            scraped_at: None,
-            scrape_result: None,
-            processed_at: None,
-            process_result: None,
+                    visited_urls
+                        .write()
+                        .await
+                        .insert(url.clone(), state::CrawledState::queued());
+                    tokio::select! {
+                        _ = urls_to_visit_tx.send(url) => {
+                        }
+                        _ = handler.shutdown.recv() => {
+                            tracing::info!("listen_for_new_urls: shutting down");
+                            return;
+                        }
+                    }
+                }
+            }
         }
-    }
-}
 
-impl CrawledState {
-    pub fn queued() -> CrawledState {
-        Self::default()
-    }
-    pub fn processed_ok<S: Into<String>>(&mut self, path: S) {
-        self.processed_at = Some(Utc::now());
-        self.process_result = Some(StateOutcome::Ok(path.into()));
-    }
-    pub fn scraped_ok(&mut self) {
-        self.scraped_at = Some(Utc::now());
-        self.scrape_result = Some(StateOutcome::Ok("".into()))
-    }
-    pub fn process_error<S: Into<String>>(&mut self, error: S) {
-        self.processed_at = Some(Utc::now());
-        self.process_result = Some(StateOutcome::Error(error.into()));
-    }
-    pub fn scrape_error<S: Into<String>>(&mut self, error: S) {
-        self.scraped_at = Some(Utc::now());
-        self.scrape_result = Some(StateOutcome::Error(error.into()))
+        if new_urls_tx.capacity() == crawling_queue_capacity // new_urls channel is empty
+        && urls_to_visit_tx.capacity() == crawling_queue_capacity // urls_to_visit channel is empty
+        && active_spiders.load(Ordering::SeqCst) == 0
+        {
+            // no more work, we leave
+            break;
+        }
+
+        sleep(Duration::from_millis(5)).await;
     }
 }

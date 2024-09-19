@@ -1,0 +1,14 @@
+[package]
+name = "examples"
+publish = false
+edition = "2021"
+
+[[bin]]
+name = "fake-crawler"
+path = "src/fake_crawler/main.rs"
+
+[dependencies]
+async-trait = "0.1.82"
+tokio = { version = "1.40.0", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+webcrawler = { version = "0.1.0", path = ".." }
