@@ -2,6 +2,7 @@
 name = "examples"
 publish = false
 edition = "2021"
+version = "0.0.0"
 
 [[bin]]
 name = "fake-crawler"
