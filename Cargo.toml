@@ -1,7 +1,16 @@
 [package]
+authors = [
+    "Språkbanken Text <sb-info@svenska.gu.se>",
+    "Kristoffer Andersson <kristoffer.andersson@gu.se>",
+]
+description = "A library for crawling the web."
 name = "webcrawler"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+include = ["src/**/*.rs", "LICENSE", "*.md", "example/**/*", "Cargo.toml"]
+repository = "https://github.com/spraakbanken/webcrawler-rs"
+homepage = "https://spraakbanken.gu.se"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
