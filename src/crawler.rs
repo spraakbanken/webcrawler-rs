@@ -366,7 +366,11 @@ async fn listen_for_new_urls(
                 .or_insert_with(state::CrawledState::queued_and_scraped_ok);
 
             for url in new_urls {
-                if !visited_urls.read().await.contains_key(&url) {
+                let visit_this_url = match visited_urls.read().await.get(&url) {
+                    None => true,
+                    Some(state) => !state.is_processed(),
+                };
+                if visit_this_url {
                     tracing::debug!("queueing: {}", url);
 
                     visited_urls

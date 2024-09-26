@@ -78,6 +78,13 @@ impl CrawledState {
         self.scraped_at = Some(Utc::now());
         self.scrape_result = Some(StateOutcome::Error(error.into()))
     }
+
+    pub fn is_processed(&self) -> bool {
+        match self.process_result {
+            Some(StateOutcome::Ok(_)) => true,
+            _ => false,
+        }
+    }
 }
 pub(crate) type ProcessingState = HashMap<String, CrawledState>;
 pub(crate) type SharedProcessingState = Arc<RwLock<ProcessingState>>;
