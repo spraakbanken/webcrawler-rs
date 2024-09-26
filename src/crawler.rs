@@ -155,7 +155,7 @@ impl Crawler {
         let tracker = TaskTracker::new();
 
         for url in spider.start_urls() {
-            tracing::info!(start_url = url);
+            tracing::info!(start_url = url, "Adding start_url to queue");
             visited_urls
                 .write()
                 .await
@@ -233,7 +233,12 @@ impl Crawler {
                     match spider.process(url.clone(), item).await {
                         Err(err) => {
                             num_process_errors.fetch_add(1, Ordering::SeqCst);
-                            tracing::error!(url = url, "Processing error: {:?}", err);
+                            tracing::error!(
+                                url = url,
+                                error.msg = %err,
+                                error.details = ?err,
+                                "An error occurred during processing"
+                            );
                             visited_urls
                                 .write()
                                 .await
@@ -289,7 +294,12 @@ impl Crawler {
                                 Err(err) => {
                                     num_scrapings.fetch_add(1, Ordering::SeqCst);
                                     num_scrape_errors.fetch_add(1, Ordering::SeqCst);
-                                    tracing::error!(url = queued_url, "Scraping error: {:?}", err);
+                                    tracing::error!(
+                                        url = queued_url,
+                                        error.msg = %err,
+                                        error.details = ?err,
+                                        "An error occurred during scraping"
+                                    );
                                     visited_urls
                                         .write()
                                         .await
