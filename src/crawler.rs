@@ -229,7 +229,7 @@ impl Crawler {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(items)
                 .for_each_concurrent(concurrency, |(url, item)| async {
-                    tracing::debug!(url, "processing item from url");
+                    tracing::info!(url, "Start processing given item from url");
                     match spider.process(url.clone(), item).await {
                         Err(err) => {
                             num_process_errors.fetch_add(1, Ordering::SeqCst);
@@ -284,7 +284,7 @@ impl Crawler {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(urls_to_visit)
                 .for_each_concurrent(concurrency, |queued_url| async {
-                    tracing::info!(url = queued_url, "scraping");
+                    tracing::info!(url = queued_url, "Start scraping the given url");
                     let mut handler = handler.clone();
                     active_spiders.fetch_add(1, Ordering::SeqCst);
                     let mut urls = Vec::new();
