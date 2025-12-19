@@ -216,6 +216,7 @@ impl Crawler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_processors<T: Send + 'static, E: StdError + Send + 'static>(
         &self,
         tracker: &TaskTracker,

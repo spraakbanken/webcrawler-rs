@@ -16,7 +16,7 @@ async fn main() {
         )
         .init();
 
-    let spider = Arc::new(fake_crawler::FakeSpider::new());
+    let spider = Arc::new(fake_crawler::FakeSpider::default());
     crawler::run(spider, signal::ctrl_c()).await;
 }
 
@@ -26,14 +26,8 @@ pub mod fake_crawler {
     use async_trait::async_trait;
     use webcrawler::Spider;
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub struct FakeSpider {}
-
-    impl FakeSpider {
-        pub fn new() -> Self {
-            Self {}
-        }
-    }
 
     #[async_trait]
     impl Spider for FakeSpider {
