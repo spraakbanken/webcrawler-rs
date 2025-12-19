@@ -108,7 +108,7 @@ pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static>(
     tokio::select! {
         res = crawler.run(spider) => {
             if let Err(err) = res {
-                tracing::error!(cause = %err, "crawling failed");
+                tracing_log_error::log_error!(*err, "crawling failed");
             }
         }
         _ = shutdown => {
@@ -230,14 +230,13 @@ impl Crawler {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(items)
                 .for_each_concurrent(concurrency, |(url, item)| async {
-                    tracing::info!(url, "Start processing given item from url");
+                    tracing::debug!(url, "Start processing given item from url");
                     match spider.process(url.clone(), item).await {
                         Err(err) => {
                             num_process_errors.fetch_add(1, Ordering::SeqCst);
-                            tracing::error!(
+                            tracing_log_error::log_error!(
+                                err,
                                 url = url,
-                                error.msg = %err,
-                                error.details = ?err,
                                 "An error occurred during processing"
                             );
                             visited_urls
@@ -285,7 +284,7 @@ impl Crawler {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(urls_to_visit)
                 .for_each_concurrent(concurrency, |queued_url| async {
-                    tracing::info!(url = queued_url, "Start scraping the given url");
+                    tracing::debug!(url = queued_url, "Start scraping the given url");
                     let mut handler = handler.clone();
                     active_spiders.fetch_add(1, Ordering::SeqCst);
                     let mut urls = Vec::new();
@@ -295,10 +294,8 @@ impl Crawler {
                                 Err(err) => {
                                     num_scrapings.fetch_add(1, Ordering::SeqCst);
                                     num_scrape_errors.fetch_add(1, Ordering::SeqCst);
-                                    tracing::error!(
+                                    tracing_log_error::log_error!(err,
                                         url = queued_url,
-                                        error.msg = %err,
-                                        error.details = ?err,
                                         "An error occurred during scraping"
                                     );
                                     visited_urls
@@ -323,7 +320,7 @@ impl Crawler {
                         }
                             _ = handler.shutdown.recv() => {
                                 // If a shutdown signal is received, return
-                                tracing::info!(url = queued_url, "scraper: shutdown signal received, shutting down");
+                                tracing::warn!(url = queued_url, "scraper: shutdown signal received, shutting down");
                                 None
                             }
                     };

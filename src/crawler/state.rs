@@ -142,27 +142,27 @@ pub(crate) fn read_state(saved_state_path: Option<&Path>) -> SharedProcessingSta
                     Ok(mut json) => {
                         match ProcessingState::deserialize(json["visited_urls"].take()) {
                             Ok(visited_urls) => {
-                                tracing::info!(
+                                tracing::debug!(
                                     "read saved state from '{}'",
                                     saved_state_path.display()
                                 );
                                 visited_urls
                             }
                             Err(err) => {
-                                tracing::error!(
-                                    "Failed to read saved state from '{}' Error: '{:?}'. Ignoring",
+                                tracing_log_error::log_error!(
+                                    err,
+                                    "Failed to read saved state from '{}'. Ignoring",
                                     saved_state_path.display(),
-                                    err
                                 );
                                 ProcessingState::new()
                             }
                         }
                     }
                     Err(err) => {
-                        tracing::error!(
-                            "Failed to read file '{}' Error: '{:?}'. Ignoring",
+                        tracing_log_error::log_error!(
+                            err,
+                            "Failed to read file '{}'. Ignoring",
                             saved_state_path.display(),
-                            err
                         );
                         ProcessingState::new()
                     }
@@ -170,9 +170,11 @@ pub(crate) fn read_state(saved_state_path: Option<&Path>) -> SharedProcessingSta
             }
             Err(err) => {
                 tracing::warn!(
-                    "Failed to open file from '{}' Error: '{:?}'. Ignoring",
+                    error.message = tracing_log_error::fields::error_message(&err),
+                    error.details = tracing_log_error::fields::error_details(&err),
+                    error.source_chain = tracing_log_error::fields::error_source_chain(&err),
+                    "Failed to open file from '{}'. Ignoring",
                     saved_state_path.display(),
-                    err
                 );
                 ProcessingState::new()
             }
