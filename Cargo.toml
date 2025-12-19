@@ -19,6 +19,7 @@ doctest = false
 [dependencies]
 async-trait = "0.1.82"
 chrono = { version = "0.4.37", features = ["serde"] }
+fs-err = "3.2.1"
 futures = "0.3.30"
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"

@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
-    fs,
     io::{self, Write},
     path::Path,
     sync::Arc,
 };
+
+use fs_err as fs;
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -80,10 +81,7 @@ impl CrawledState {
     }
 
     pub fn is_processed(&self) -> bool {
-        match self.process_result {
-            Some(StateOutcome::Ok(_)) => true,
-            _ => false,
-        }
+        matches!(self.process_result, Some(StateOutcome::Ok(_)))
     }
 }
 pub(crate) type ProcessingState = HashMap<String, CrawledState>;
