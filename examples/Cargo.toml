@@ -11,5 +11,5 @@ path = "src/fake_crawler/main.rs"
 [dependencies]
 async-trait = "0.1.82"
 tokio = { version = "1.43.1", features = ["rt-multi-thread", "macros"] }
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 webcrawler = { path = ".." }

@@ -1,7 +1,6 @@
 [package]
 authors = [
     "Språkbanken Text <sb-info@svenska.gu.se>",
-    "Kristoffer Andersson <kristoffer.andersson@gu.se>",
 ]
 description = "A library for crawling the web."
 name = "webcrawler"
