@@ -1,4 +1,5 @@
 # webcrawler-rs
+
 Library for building a webcrawlers
 
 [![MIT licensed][mit-badge]][mit-url]
@@ -30,7 +31,8 @@ from 1.0 to 1.1 allows us to increase the MSRV. Users unable to increase their
 Rust version can use an older minor version instead. Below is a list of webcrawler versions
 and their MSRV:
 
- * v0.1: Rust 1.70.
+- v0.2: Rust 1.71.
+- v0.1: Rust 1.70.
 
 Note however that webcrawler also has dependencies, which might have different MSRV
 policies. We try to stick to the above policy when updating dependencies, but
