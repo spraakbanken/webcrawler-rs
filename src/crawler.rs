@@ -354,6 +354,31 @@ async fn listen_for_new_urls(
     crawling_queue_capacity: usize,
     active_spiders: Arc<AtomicUsize>,
 ) {
+    {
+        let loaded_state = visited_urls.read().await;
+        for (url, state) in loaded_state.iter() {
+            if !state.is_processed() {
+                let old_state = visited_urls
+                    .write()
+                    .await
+                    .insert(url.clone(), state::CrawledState::queued());
+                tracing::debug!(
+                    url = url,
+                    old_state = ?old_state,
+                    "queueing from loaded state: {}",
+                    url
+                );
+                tokio::select! {
+                    _ = urls_to_visit_tx.send(url.clone()) => {
+                    }
+                    _ = handler.shutdown.recv() => {
+                        tracing::info!("listen_for_new_urls: shutting down");
+                        return;
+                    }
+                }
+            }
+        }
+    }
     while !handler.shutdown.is_shutdown() {
         if let Ok((visited_url, new_urls)) = new_urls_rx.try_recv() {
             visited_urls
