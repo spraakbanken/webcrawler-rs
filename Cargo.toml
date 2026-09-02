@@ -28,6 +28,7 @@ tokio-stream = "0.1.16"
 tokio-util = { version = "0.7.11", features = ["rt"] }
 tracing = "0.1.41"
 tracing_log_error = "0.1.4"
+valuable = { version = "0.1.1", features = ["derive"] }
 
 [workspace]
 members = ["examples"]
