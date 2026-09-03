@@ -24,31 +24,35 @@ pub mod fake_crawler {
     use std::{fmt, time::Duration};
 
     use async_trait::async_trait;
-    use webcrawler::Spider;
+    use webcrawler::{Spider, Url};
 
     #[derive(Debug, Default)]
     pub struct FakeSpider {}
 
     #[async_trait]
     impl Spider for FakeSpider {
+        type Url = String;
         type Item = String;
         type Error = FakeError;
 
         fn name(&self) -> String {
             "fake-spider".to_string()
         }
-        fn start_urls(&self) -> Vec<String> {
+        fn start_urls(&self) -> Vec<Self::Url> {
             vec![
                 "https://example.com/1".to_string(),
                 "https://example.com/2".to_string(),
                 "https://example.com/3".to_string(),
             ]
         }
-        async fn scrape(&self, url: String) -> Result<(Vec<Self::Item>, Vec<String>), Self::Error> {
+        async fn scrape(
+            &self,
+            url: Self::Url,
+        ) -> Result<(Vec<Self::Item>, Vec<Self::Url>), Self::Error> {
             println!("scraping {}", url);
             let mut items = Vec::new();
             let mut new_urls = Vec::new();
-            if !url.ends_with("0") {
+            if !url.url().ends_with("0") {
                 new_urls.push(format!("{}0", url));
             }
             items.push(format!("Scraped from {}", url));
@@ -56,7 +60,7 @@ pub mod fake_crawler {
             Ok((items, new_urls))
         }
 
-        async fn process(&self, url: String, item: Self::Item) -> Result<String, Self::Error> {
+        async fn process(&self, url: Self::Url, item: Self::Item) -> Result<String, Self::Error> {
             tokio::time::sleep(Duration::from_secs(1)).await;
             println!("processing '{}': {}", url, item);
 

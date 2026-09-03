@@ -11,8 +11,12 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
+use crate::spider::Url;
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub(crate) struct CrawledState {
+#[serde(bound = "U: serde::Serialize + serde::de::DeserializeOwned")]
+pub(crate) struct CrawledState<U: Url> {
+    pub(crate) url: U,
     queued: DateTime<Utc>,
     scraped_at: Option<DateTime<Utc>>,
     scrape_result: Option<StateOutcome>,
@@ -27,9 +31,10 @@ pub enum StateOutcome {
     Error(String),
 }
 
-impl Default for CrawledState {
-    fn default() -> Self {
+impl<U: Url> CrawledState<U> {
+    pub fn new(url: U) -> Self {
         Self {
+            url,
             queued: Utc::now(),
             scraped_at: None,
             scrape_result: None,
@@ -37,29 +42,26 @@ impl Default for CrawledState {
             process_result: None,
         }
     }
-}
-
-impl CrawledState {
-    pub fn queued() -> CrawledState {
-        Self::default()
+    pub fn queued(url: U) -> CrawledState<U> {
+        Self::new(url)
     }
-    pub fn queued_and_scraped_ok() -> CrawledState {
-        let mut state = CrawledState::default();
+    pub fn queued_and_scraped_ok(url: U) -> CrawledState<U> {
+        let mut state = CrawledState::new(url);
         state.scraped_ok();
         state
     }
-    pub fn queued_and_scrape_error(error: String) -> CrawledState {
-        let mut state = CrawledState::default();
+    pub fn queued_and_scrape_error(url: U, error: String) -> CrawledState<U> {
+        let mut state = CrawledState::new(url);
         state.scrape_error(error);
         state
     }
-    pub fn queued_and_processed_ok<S: Into<String>>(path: S) -> CrawledState {
-        let mut state = CrawledState::default();
+    pub fn queued_and_processed_ok<S: Into<String>>(url: U, path: S) -> CrawledState<U> {
+        let mut state = CrawledState::new(url);
         state.processed_ok(path.into());
         state
     }
-    pub fn queued_and_process_error(error: String) -> CrawledState {
-        let mut state = CrawledState::default();
+    pub fn queued_and_process_error(url: U, error: String) -> CrawledState<U> {
+        let mut state = CrawledState::new(url);
         state.process_error(error);
         state
     }
@@ -79,17 +81,24 @@ impl CrawledState {
         self.scraped_at = Some(Utc::now());
         self.scrape_result = Some(StateOutcome::Error(error.into()))
     }
+    pub fn reset_as_queued(&mut self) {
+        self.queued = Utc::now();
+        self.scraped_at = None;
+        self.scrape_result = None;
+        self.processed_at = None;
+        self.process_result = None;
+    }
 
     pub fn is_processed(&self) -> bool {
         matches!(self.process_result, Some(StateOutcome::Ok(_)))
     }
 }
-pub(crate) type ProcessingState = HashMap<String, CrawledState>;
-pub(crate) type SharedProcessingState = Arc<RwLock<ProcessingState>>;
+pub(crate) type ProcessingState<U> = HashMap<String, CrawledState<U>>;
+pub(crate) type SharedProcessingState<U> = Arc<RwLock<ProcessingState<U>>>;
 
-pub(crate) async fn write_state(
+pub(crate) async fn write_state<U: Url>(
     saved_state_path: Option<&Path>,
-    visited_urls: SharedProcessingState,
+    visited_urls: SharedProcessingState<U>,
 ) {
     let json = serde_json::json!({ "visited_urls": &*visited_urls.read().await });
     match serde_json::to_string(&json) {
@@ -132,7 +141,7 @@ pub(crate) async fn write_state(
     }
 }
 
-pub(crate) fn read_state(saved_state_path: Option<&Path>) -> SharedProcessingState {
+pub(crate) fn read_state<U: Url>(saved_state_path: Option<&Path>) -> SharedProcessingState<U> {
     let processing_state = if let Some(saved_state_path) = saved_state_path {
         match fs::File::open(saved_state_path) {
             Ok(file) => {

@@ -17,18 +17,19 @@ use tokio_util::task::TaskTracker;
 use self::state::SharedProcessingState;
 use self::statistics::Statistics;
 use crate::shutdown::Shutdown;
+use crate::spider::Url;
 use crate::Spider;
 
 mod state;
 mod statistics;
 
-pub struct Crawler {
+pub struct Crawler<U: Url> {
     delay: Duration,
     crawling_concurrency: usize,
     processing_concurrency: usize,
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
-    visited_urls: SharedProcessingState,
+    visited_urls: SharedProcessingState<U>,
     statistics: Statistics,
 }
 
@@ -67,8 +68,8 @@ impl Default for CrawlerOptions {
 ///
 /// `tokio::signal::ctrl_c()` can be used as the `shutdown` argument. This will
 /// listen for a SIGINT signal.
-pub async fn run<T: Send + 'static, E: StdError + Send + 'static>(
-    spider: Arc<dyn Spider<Item = T, Error = E>>,
+pub async fn run<T: Send + 'static, E: StdError + Send + 'static, U: Url + 'static>(
+    spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
     shutdown: impl Future,
 ) {
     run_with_options(spider, shutdown, CrawlerOptions::default()).await
@@ -80,8 +81,8 @@ pub async fn run<T: Send + 'static, E: StdError + Send + 'static>(
 ///
 /// `tokio::signal::ctrl_c()` can be used as the `shutdown` argument. This will
 /// listen for a SIGINT signal.
-pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static>(
-    spider: Arc<dyn Spider<Item = T, Error = E>>,
+pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static, U: Url + 'static>(
+    spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
     shutdown: impl Future,
     CrawlerOptions {
         saved_state_path,
@@ -136,11 +137,15 @@ pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static>(
 
     state::write_state(saved_state_path.as_deref(), visited_urls).await;
 }
-impl Crawler {
-    pub async fn run<T: Send + 'static, E: StdError + Send + 'static>(
+impl<U: Url + 'static> Crawler<U> {
+    pub async fn run<T, E>(
         &self,
-        spider: Arc<dyn Spider<Item = T, Error = E>>,
-    ) -> Result<(), Box<dyn StdError>> {
+        spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
+    ) -> Result<(), Box<dyn StdError>>
+    where
+        T: Send + 'static,
+        E: StdError + Send + 'static,
+    {
         tracing::info!("running spider '{}'", spider.name());
         let visited_urls = self.visited_urls.clone();
         let crawling_concurrency = self.crawling_concurrency;
@@ -155,11 +160,11 @@ impl Crawler {
         let tracker = TaskTracker::new();
 
         for url in spider.start_urls() {
-            tracing::info!(start_url = url, "Adding start_url to queue");
+            tracing::info!(start_url = %url, "Adding start_url to queue");
             visited_urls
                 .write()
                 .await
-                .insert(url.clone(), state::CrawledState::queued());
+                .insert(url.url().clone(), state::CrawledState::queued(url.clone()));
             let _ = urls_to_visit_tx.send(url).await;
         }
 
@@ -223,39 +228,42 @@ impl Crawler {
         concurrency: usize,
         num_processings: Arc<AtomicUsize>,
         num_process_errors: Arc<AtomicUsize>,
-        visited_urls: SharedProcessingState,
-        spider: Arc<dyn Spider<Item = T, Error = E>>,
-        items: mpsc::Receiver<(String, T)>,
+        visited_urls: SharedProcessingState<U>,
+        spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
+        items: mpsc::Receiver<(U, T)>,
     ) {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(items)
                 .for_each_concurrent(concurrency, |(url, item)| async {
-                    tracing::debug!(url, "Start processing given item from url");
+                    tracing::debug!(url = %url, "Start processing given item from url");
                     match spider.process(url.clone(), item).await {
                         Err(err) => {
                             num_process_errors.fetch_add(1, Ordering::SeqCst);
                             tracing_log_error::log_error!(
                                 err,
-                                url = url,
+                                url = %url,
                                 "An error occurred during processing"
                             );
                             visited_urls
                                 .write()
                                 .await
-                                .entry(url)
+                                .entry(url.url().clone())
                                 .and_modify(|state| state.process_error(err.to_string()))
                                 .or_insert_with(|| {
-                                    state::CrawledState::queued_and_process_error(err.to_string())
+                                    state::CrawledState::queued_and_process_error(
+                                        url,
+                                        err.to_string(),
+                                    )
                                 });
                         }
                         Ok(output) => {
                             visited_urls
                                 .write()
                                 .await
-                                .entry(url)
+                                .entry(url.url().clone())
                                 .and_modify(|state| state.processed_ok(&output))
                                 .or_insert_with(|| {
-                                    state::CrawledState::queued_and_processed_ok(&output)
+                                    state::CrawledState::queued_and_processed_ok(url, &output)
                                 });
                         }
                     }
@@ -272,11 +280,11 @@ impl Crawler {
         concurrency: usize,
         num_scrapings: Arc<AtomicUsize>,
         num_scrape_errors: Arc<AtomicUsize>,
-        visited_urls: SharedProcessingState,
-        spider: Arc<dyn Spider<Item = T, Error = E>>,
-        urls_to_visit: mpsc::Receiver<String>,
-        new_urls_tx: mpsc::Sender<(String, Vec<String>)>,
-        items_tx: mpsc::Sender<(String, T)>,
+        visited_urls: SharedProcessingState<U>,
+        spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
+        urls_to_visit: mpsc::Receiver<U>,
+        new_urls_tx: mpsc::Sender<(U, Vec<U>)>,
+        items_tx: mpsc::Sender<(U, T)>,
         active_spiders: Arc<AtomicUsize>,
         delay: Duration,
         handler: Handler,
@@ -284,26 +292,27 @@ impl Crawler {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(urls_to_visit)
                 .for_each_concurrent(concurrency, |queued_url| async {
-                    tracing::debug!(url = queued_url, "Start scraping the given url");
+                    tracing::debug!(url = %queued_url, "Start scraping the given url");
                     let mut handler = handler.clone();
                     active_spiders.fetch_add(1, Ordering::SeqCst);
                     let mut urls = Vec::new();
                     let res = tokio::select! {
                         res = spider.scrape(queued_url.clone()) => {
+                            let queued_url = queued_url.clone();
                             match res {
                                 Err(err) => {
                                     num_scrapings.fetch_add(1, Ordering::SeqCst);
                                     num_scrape_errors.fetch_add(1, Ordering::SeqCst);
                                     tracing_log_error::log_error!(err,
-                                        url = queued_url,
+                                        url = %queued_url,
                                         "An error occurred during scraping"
                                     );
                                     visited_urls
                                         .write()
                                         .await
-                                        .entry(queued_url.clone())
+                                        .entry(queued_url.url().clone())
                                         .and_modify(|state| state.scrape_error(err.to_string()))
-                                        .or_insert_with(|| state::CrawledState::queued_and_scrape_error(err.to_string()));
+                                        .or_insert_with(|| state::CrawledState::queued_and_scrape_error(queued_url,err.to_string()));
                                     None
                                 }
                                 Ok((items, new_urls)) => {
@@ -311,16 +320,16 @@ impl Crawler {
                                     visited_urls
                                         .write()
                                         .await
-                                        .entry(queued_url.clone())
+                                        .entry(queued_url.url().clone())
                                         .and_modify(|state| state.scraped_ok())
-                                        .or_insert_with(state::CrawledState::queued_and_scraped_ok);
+                                        .or_insert_with(|| state::CrawledState::queued_and_scraped_ok(queued_url));
                                     Some((items, new_urls))
                                 }
                             }
                         }
                             _ = handler.shutdown.recv() => {
                                 // If a shutdown signal is received, return
-                                tracing::warn!(url = queued_url, "scraper: shutdown signal received, shutting down");
+                                tracing::warn!(url = %queued_url, "scraper: shutdown signal received, shutting down");
                                 None
                             }
                     };
@@ -344,12 +353,12 @@ impl Crawler {
     }
 }
 
-async fn listen_for_new_urls(
+async fn listen_for_new_urls<U: Url>(
     // &self,
-    new_urls_tx: mpsc::Sender<(String, Vec<String>)>,
-    mut new_urls_rx: mpsc::Receiver<(String, Vec<String>)>,
-    visited_urls: SharedProcessingState,
-    urls_to_visit_tx: mpsc::Sender<String>,
+    new_urls_tx: mpsc::Sender<(U, Vec<U>)>,
+    mut new_urls_rx: mpsc::Receiver<(U, Vec<U>)>,
+    visited_urls: SharedProcessingState<U>,
+    urls_to_visit_tx: mpsc::Sender<U>,
     mut handler: Handler,
     crawling_queue_capacity: usize,
     active_spiders: Arc<AtomicUsize>,
@@ -358,18 +367,22 @@ async fn listen_for_new_urls(
         let loaded_state = visited_urls.read().await;
         for (url, state) in loaded_state.iter() {
             if !state.is_processed() {
-                let old_state = visited_urls
+                visited_urls
                     .write()
                     .await
-                    .insert(url.clone(), state::CrawledState::queued());
-                tracing::debug!(
-                    url = url,
-                    old_state = ?old_state,
-                    "queueing from loaded state: {}",
-                    url
-                );
+                    .entry(url.clone())
+                    .and_modify(|state| {
+                        tracing::debug!(
+                            url = %url,
+                            old_state = ?state,
+                            "queueing from loaded state: {}",
+                            url
+                        );
+                        state.reset_as_queued()
+                    });
+                let state = visited_urls.read().await.get(url).unwrap().clone();
                 tokio::select! {
-                    _ = urls_to_visit_tx.send(url.clone()) => {
+                    _ = urls_to_visit_tx.send(state.url.clone()) => {
                     }
                     _ = handler.shutdown.recv() => {
                         tracing::info!("listen_for_new_urls: shutting down");
@@ -384,12 +397,12 @@ async fn listen_for_new_urls(
             visited_urls
                 .write()
                 .await
-                .entry(visited_url)
+                .entry(visited_url.url().clone())
                 .and_modify(|state| state.scraped_ok())
-                .or_insert_with(state::CrawledState::queued_and_scraped_ok);
+                .or_insert_with(|| state::CrawledState::queued_and_scraped_ok(visited_url));
 
             for url in new_urls {
-                let visit_this_url = match visited_urls.read().await.get(&url) {
+                let visit_this_url = match visited_urls.read().await.get(url.url()) {
                     None => true,
                     Some(state) => !state.is_processed(),
                 };
@@ -399,7 +412,7 @@ async fn listen_for_new_urls(
                     visited_urls
                         .write()
                         .await
-                        .insert(url.clone(), state::CrawledState::queued());
+                        .insert(url.url().clone(), state::CrawledState::queued(url.clone()));
                     tokio::select! {
                         _ = urls_to_visit_tx.send(url) => {
                         }
