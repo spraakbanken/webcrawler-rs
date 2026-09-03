@@ -1,16 +1,16 @@
 [package]
-authors = [
-    "Språkbanken Text <sb-info@svenska.gu.se>",
-]
-description = "A library for crawling the web."
 name = "webcrawler"
 version = "0.3.0"
 edition = "2021"
-license = "MIT"
-include = ["src/**/*.rs", "LICENSE", "*.md", "example/**/*", "Cargo.toml"]
-repository = "https://github.com/spraakbanken/webcrawler-rs"
+rust-version = "1.71.0"  # MSRV
+description = "A library for crawling the web."
 homepage = "https://spraakbanken.gu.se"
-rust-version = "1.71.0" # MSRV
+repository = "https://github.com/spraakbanken/webcrawler-rs"
+license = "MIT"
+include = ["*.md", "Cargo.toml", "LICENSE", "example/**/*", "src/**/*.rs"]
+
+[workspace]
+members = ["examples"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
@@ -28,7 +28,3 @@ tokio-stream = "0.1.16"
 tokio-util = { version = "0.7.11", features = ["rt"] }
 tracing = "0.1.41"
 tracing_log_error = "0.1.4"
-valuable = { version = "0.1.1", features = ["derive"] }
-
-[workspace]
-members = ["examples"]
