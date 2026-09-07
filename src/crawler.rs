@@ -376,7 +376,6 @@ async fn listen_for_new_urls<U: Url>(
                     url
                 );
                 state.reset_as_queued();
-                // let state = visited_urls.read().await.get(url).unwrap().clone();
                 let _ = urls_to_visit_tx.send(state.url.clone()).await;
             }
         }
