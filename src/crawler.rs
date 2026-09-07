@@ -393,6 +393,7 @@ async fn listen_for_new_urls<U: Url>(
         }
     }
     while !handler.shutdown.is_shutdown() {
+        tracing::info!("listening to new urls");
         if let Ok((visited_url, new_urls)) = new_urls_rx.try_recv() {
             visited_urls
                 .write()
@@ -402,6 +403,7 @@ async fn listen_for_new_urls<U: Url>(
                 .or_insert_with(|| state::CrawledState::queued_and_scraped_ok(visited_url));
 
             for url in new_urls {
+                tracing::trace!("Is '{}' already processed?", url.url());
                 let visit_this_url = match visited_urls.read().await.get(url.url()) {
                     None => true,
                     Some(state) => !state.is_processed(),
