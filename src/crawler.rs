@@ -365,24 +365,18 @@ async fn listen_for_new_urls<U: Url>(
 ) {
     {
         tracing::debug!("Queueing state from loaded state");
-        let loaded_state = visited_urls.read().await;
-        for (url, state) in loaded_state.iter() {
+        let mut loaded_state = visited_urls.write().await;
+        for (url, state) in loaded_state.iter_mut() {
             tracing::trace!(state=?state, "Checking state of '{}'", url);
             if !state.is_processed() {
-                visited_urls
-                    .write()
-                    .await
-                    .entry(url.clone())
-                    .and_modify(|state| {
-                        tracing::debug!(
-                            url = %url,
-                            old_state = ?state,
-                            "queueing from loaded state: {}",
-                            url
-                        );
-                        state.reset_as_queued()
-                    });
-                let state = visited_urls.read().await.get(url).unwrap().clone();
+                tracing::debug!(
+                    url = %url,
+                    old_state = ?state,
+                    "queueing from loaded state: {}",
+                    url
+                );
+                state.reset_as_queued();
+                // let state = visited_urls.read().await.get(url).unwrap().clone();
                 let _ = urls_to_visit_tx.send(state.url.clone()).await;
             }
         }
