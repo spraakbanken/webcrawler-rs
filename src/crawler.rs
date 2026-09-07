@@ -364,6 +364,7 @@ async fn listen_for_new_urls<U: Url>(
     active_spiders: Arc<AtomicUsize>,
 ) {
     {
+        tracing::debug!("Queueing state from loaded state");
         let loaded_state = visited_urls.read().await;
         for (url, state) in loaded_state.iter() {
             if !state.is_processed() {
