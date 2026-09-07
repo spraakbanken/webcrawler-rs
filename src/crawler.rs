@@ -367,6 +367,7 @@ async fn listen_for_new_urls<U: Url>(
         tracing::debug!("Queueing state from loaded state");
         let loaded_state = visited_urls.read().await;
         for (url, state) in loaded_state.iter() {
+            tracing::trace!(state=?state, "Checking state of '{}'", url);
             if !state.is_processed() {
                 visited_urls
                     .write()
@@ -382,14 +383,7 @@ async fn listen_for_new_urls<U: Url>(
                         state.reset_as_queued()
                     });
                 let state = visited_urls.read().await.get(url).unwrap().clone();
-                tokio::select! {
-                    _ = urls_to_visit_tx.send(state.url.clone()) => {
-                    }
-                    _ = handler.shutdown.recv() => {
-                        tracing::info!("listen_for_new_urls: shutting down");
-                        return;
-                    }
-                }
+                let _ = urls_to_visit_tx.send(state.url.clone()).await;
             }
         }
     }
