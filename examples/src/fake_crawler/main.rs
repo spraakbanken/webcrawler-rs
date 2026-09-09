@@ -33,7 +33,8 @@ pub mod fake_crawler {
     impl Spider for FakeSpider {
         type Url = String;
         type Item = String;
-        type Error = FakeError;
+        type ScrapeError = FakeError;
+        type ProcessError = FakeError;
 
         fn name(&self) -> String {
             "fake-spider".to_string()
@@ -48,7 +49,7 @@ pub mod fake_crawler {
         async fn scrape(
             &self,
             url: Self::Url,
-        ) -> Result<(Vec<Self::Item>, Vec<Self::Url>), Self::Error> {
+        ) -> Result<(Vec<Self::Item>, Vec<Self::Url>), exn::Exn<Self::ScrapeError>> {
             println!("scraping {}", url);
             let mut items = Vec::new();
             let mut new_urls = Vec::new();
@@ -60,7 +61,11 @@ pub mod fake_crawler {
             Ok((items, new_urls))
         }
 
-        async fn process(&self, url: Self::Url, item: Self::Item) -> Result<String, Self::Error> {
+        async fn process(
+            &self,
+            url: Self::Url,
+            item: Self::Item,
+        ) -> Result<String, exn::Exn<Self::ProcessError>> {
             tokio::time::sleep(Duration::from_secs(1)).await;
             println!("processing '{}': {}", url, item);
 

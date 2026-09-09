@@ -158,7 +158,8 @@ pub(crate) fn read_state<U: Url>(saved_state_path: Option<&Path>) -> SharedProce
                                 visited_urls
                             }
                             Err(err) => {
-                                tracing_log_error::log_error!(
+                                let err = exn::Exn::from(err);
+                                tracing_log_exn_error::log_error!(
                                     err,
                                     "Failed to read saved state from '{}'. Ignoring",
                                     saved_state_path.display(),
@@ -168,7 +169,8 @@ pub(crate) fn read_state<U: Url>(saved_state_path: Option<&Path>) -> SharedProce
                         }
                     }
                     Err(err) => {
-                        tracing_log_error::log_error!(
+                        let err = exn::Exn::from(err);
+                        tracing_log_exn_error::log_error!(
                             err,
                             "Failed to read file '{}'. Ignoring",
                             saved_state_path.display(),
@@ -178,10 +180,8 @@ pub(crate) fn read_state<U: Url>(saved_state_path: Option<&Path>) -> SharedProce
                 }
             }
             Err(err) => {
-                tracing::warn!(
-                    error.message = tracing_log_error::fields::error_message(&err),
-                    error.details = tracing_log_error::fields::error_details(&err),
-                    error.source_chain = tracing_log_error::fields::error_source_chain(&err),
+                let err = exn::Exn::from(err);
+                tracing_log_exn_error::log_error!(err, level: tracing::Level::WARN,
                     "Failed to open file from '{}'. Ignoring",
                     saved_state_path.display(),
                 );

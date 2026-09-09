@@ -68,10 +68,15 @@ impl Default for CrawlerOptions {
 ///
 /// `tokio::signal::ctrl_c()` can be used as the `shutdown` argument. This will
 /// listen for a SIGINT signal.
-pub async fn run<T: Send + 'static, E: StdError + Send + 'static, U: Url + 'static>(
-    spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
+pub async fn run<T, SE, PE, U>(
+    spider: Arc<dyn Spider<Item = T, ScrapeError = SE, ProcessError = PE, Url = U>>,
     shutdown: impl Future,
-) {
+) where
+    T: Send + 'static,
+    SE: StdError + Send + Sync + 'static,
+    PE: StdError + Send + Sync + 'static,
+    U: Url + 'static,
+{
     run_with_options(spider, shutdown, CrawlerOptions::default()).await
 }
 
@@ -81,8 +86,8 @@ pub async fn run<T: Send + 'static, E: StdError + Send + 'static, U: Url + 'stat
 ///
 /// `tokio::signal::ctrl_c()` can be used as the `shutdown` argument. This will
 /// listen for a SIGINT signal.
-pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static, U: Url + 'static>(
-    spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
+pub async fn run_with_options<T, SE, PE, U>(
+    spider: Arc<dyn Spider<Item = T, ScrapeError = SE, ProcessError = PE, Url = U>>,
     shutdown: impl Future,
     CrawlerOptions {
         saved_state_path,
@@ -90,7 +95,12 @@ pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static, U
         crawling_concurrency,
         processing_concurrency,
     }: CrawlerOptions,
-) {
+) where
+    T: Send + 'static,
+    SE: StdError + Send + Sync + 'static,
+    PE: StdError + Send + Sync + 'static,
+    U: Url + 'static,
+{
     let starting_time = Instant::now();
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
@@ -109,7 +119,7 @@ pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static, U
     tokio::select! {
         res = crawler.run(spider) => {
             if let Err(err) = res {
-                tracing_log_error::log_error!(*err, "crawling failed");
+                tracing_log_exn_error::log_error!(err, "crawling failed");
             }
         }
         _ = shutdown => {
@@ -137,14 +147,26 @@ pub async fn run_with_options<T: Send + 'static, E: StdError + Send + 'static, U
 
     state::write_state(saved_state_path.as_deref(), visited_urls).await;
 }
+
+#[derive(Debug)]
+pub struct CrawlError;
+
+impl std::fmt::Display for CrawlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Crawling failed")
+    }
+}
+impl std::error::Error for CrawlError {}
+
 impl<U: Url + 'static> Crawler<U> {
-    pub async fn run<T, E>(
+    pub async fn run<T, SE, PE>(
         &self,
-        spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
-    ) -> Result<(), Box<dyn StdError>>
+        spider: Arc<dyn Spider<Item = T, ScrapeError = SE, ProcessError = PE, Url = U>>,
+    ) -> Result<(), exn::Exn<CrawlError>>
     where
         T: Send + 'static,
-        E: StdError + Send + 'static,
+        SE: StdError + Send + Sync + 'static,
+        PE: StdError + Send + Sync + 'static,
     {
         tracing::info!("running spider '{}'", spider.name());
         let visited_urls = self.visited_urls.clone();
@@ -222,16 +244,20 @@ impl<U: Url + 'static> Crawler<U> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_processors<T: Send + 'static, E: StdError + Send + 'static>(
+    fn launch_processors<T, SE, PE>(
         &self,
         tracker: &TaskTracker,
         concurrency: usize,
         num_processings: Arc<AtomicUsize>,
         num_process_errors: Arc<AtomicUsize>,
         visited_urls: SharedProcessingState<U>,
-        spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
+        spider: Arc<dyn Spider<Item = T, ScrapeError = SE, ProcessError = PE, Url = U>>,
         items: mpsc::Receiver<(U, T)>,
-    ) {
+    ) where
+        T: Send + 'static,
+        SE: StdError + Send + Sync + 'static,
+        PE: StdError + Send + Sync + 'static,
+    {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(items)
                 .for_each_concurrent(concurrency, |(url, item)| async {
@@ -239,7 +265,7 @@ impl<U: Url + 'static> Crawler<U> {
                     match spider.process(url.clone(), item).await {
                         Err(err) => {
                             num_process_errors.fetch_add(1, Ordering::SeqCst);
-                            tracing_log_error::log_error!(
+                            tracing_log_exn_error::log_error!(
                                 err,
                                 url = %url,
                                 "An error occurred during processing"
@@ -274,21 +300,25 @@ impl<U: Url + 'static> Crawler<U> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_scrapers<T: Send + 'static, E: StdError + Send + 'static>(
+    fn launch_scrapers<T, SE, PE>(
         &self,
         tracker: &TaskTracker,
         concurrency: usize,
         num_scrapings: Arc<AtomicUsize>,
         num_scrape_errors: Arc<AtomicUsize>,
         visited_urls: SharedProcessingState<U>,
-        spider: Arc<dyn Spider<Item = T, Error = E, Url = U>>,
+        spider: Arc<dyn Spider<Item = T, ScrapeError = SE, ProcessError = PE, Url = U>>,
         urls_to_visit: mpsc::Receiver<U>,
         new_urls_tx: mpsc::Sender<(U, Vec<U>)>,
         items_tx: mpsc::Sender<(U, T)>,
         active_spiders: Arc<AtomicUsize>,
         delay: Duration,
         handler: Handler,
-    ) {
+    ) where
+        T: Send + 'static,
+        SE: StdError + Send + Sync + 'static,
+        PE: StdError + Send + Sync + 'static,
+    {
         tracker.spawn(async move {
             tokio_stream::wrappers::ReceiverStream::new(urls_to_visit)
                 .for_each_concurrent(concurrency, |queued_url| async {
@@ -303,7 +333,7 @@ impl<U: Url + 'static> Crawler<U> {
                                 Err(err) => {
                                     num_scrapings.fetch_add(1, Ordering::SeqCst);
                                     num_scrape_errors.fetch_add(1, Ordering::SeqCst);
-                                    tracing_log_error::log_error!(err,
+                                    tracing_log_exn_error::log_error!(err,
                                         url = %queued_url,
                                         "An error occurred during scraping"
                                     );

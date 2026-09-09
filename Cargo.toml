@@ -19,6 +19,7 @@ doctest = false
 [dependencies]
 async-trait = "0.1.82"
 chrono = { version = "0.4.37", features = ["serde"] }
+exn = "0.3.0"
 fs-err = { version = "3.2.1", features = ["expose_original_error"] }
 futures = "0.3.30"
 serde = { version = "1.0.210", features = ["derive"] }
@@ -27,4 +28,4 @@ tokio = { version = "1.43.1", features = ["macros", "rt", "signal", "sync"] }
 tokio-stream = "0.1.16"
 tokio-util = { version = "0.7.11", features = ["rt"] }
 tracing = "0.1.41"
-tracing_log_error = "0.1.4"
+tracing-log-exn-error = { git = "https://github.com/kod-kristoff/tracing-log-exn-error", version = "0.1.0" }

@@ -96,10 +96,17 @@ name = "examples"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "exn",
  "tokio",
  "tracing-subscriber",
  "webcrawler",
 ]
+
+[[package]]
+name = "exn"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84c8eaf8836c22a841ee5362e227dd09e5908b52fa2a9bc786cf153c0f344b99"
 
 [[package]]
 name = "fs-err"
@@ -558,6 +565,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-log-exn-error"
+version = "0.1.0"
+source = "git+https://github.com/kod-kristoff/tracing-log-exn-error#eb27dc64bf40903b4420d1f972dada538c7ea84d"
+dependencies = [
+ "exn",
+ "tracing",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,15 +589,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "tracing_log_error"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acc88373b516b143fd79ef5109b9c077ade5bfcbdc566d63e2d827fb951b6849"
-dependencies = [
- "tracing",
 ]
 
 [[package]]
@@ -663,6 +670,7 @@ version = "0.3.5"
 dependencies = [
  "async-trait",
  "chrono",
+ "exn",
  "fs-err",
  "futures",
  "serde",
@@ -671,7 +679,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
- "tracing_log_error",
+ "tracing-log-exn-error",
 ]
 
 [[package]]
